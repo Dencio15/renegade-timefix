@@ -1,4 +1,4 @@
-// "IT Time Fix.exe" -- agent-facing "my clock is wrong" button.
+﻿// "IT Time Fix.exe" -- agent-facing "my clock is wrong" button.
 //
 // Runs as a STANDARD USER with no UAC prompt.
 //
@@ -9,17 +9,20 @@
 //
 // Setting the TIME ZONE does work unprivileged, so that always happens.
 //
-// Build: csc.exe /nologo /target:exe /win32icon:"icons\it-time-fix.ico"
-//               /out:"IT Time Fix.exe" /r:System.dll "IT-Time-Fix.cs"
+// Build: csc.exe /nologo /target:winexe /r:System.Drawing.dll /r:System.Windows.Forms.dll /out:"IT Time Fix.exe" "IT-Time-Fix.cs"
 
 using System;
 using System.Diagnostics;
+using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using Microsoft.Win32;
 
 // Shown in the file's Properties -> Details tab and in Task Manager.
 [assembly: AssemblyTitle("IT Time Fix")]
@@ -57,93 +60,301 @@ internal static class FixTime
         new[] { "http://www.google.com",                         "header" }
     };
 
+    private static Action<string> report = delegate { };
+
+    [STAThread]
     private static int Main(string[] args)
     {
-        bool quiet = Array.IndexOf(args, "/quiet") >= 0;
+        if (Array.IndexOf(args, "/startup") >= 0)
+        {
+            int result = FixClock();
+            if (result != 2)
+                return result;
 
-        try { Console.Title = "IT Time Fix"; } catch { }
+            // The network may still be coming up at sign-in.
+            Thread.Sleep(TimeSpan.FromSeconds(15));
+            return FixClock();
+        }
 
-        Console.WriteLine();
-        Console.WriteLine("  IT Time Fix - correcting the time zone and clock");
-        Console.WriteLine("  ------------------------------------------------");
-        Console.WriteLine();
+        if (Array.IndexOf(args, "/quiet") >= 0)
+            return FixClock();
 
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+
+        using (var window = new Form())
+        {
+            window.Text = "IT Time Fix";
+            window.StartPosition = FormStartPosition.CenterScreen;
+            window.AutoScaleMode = AutoScaleMode.Dpi;
+            window.AutoSize = true;
+            window.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            window.FormBorderStyle = FormBorderStyle.FixedDialog;
+            window.MaximizeBox = false;
+            window.BackColor = SystemColors.Window;
+            window.ForeColor = SystemColors.WindowText;
+            window.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+
+            using (var headingFont = new Font("Segoe UI", 19, FontStyle.Bold))
+            using (var bodyFont = new Font("Segoe UI", 11))
+            {
+                window.Font = bodyFont;
+
+                var layout = new TableLayoutPanel
+                {
+                    AutoSize = true,
+                    AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                    Dock = DockStyle.Fill,
+                    Padding = new Padding(24),
+                    ColumnCount = 1
+                };
+                layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+                var status = new Label
+                {
+                    AutoSize = true,
+                    Font = headingFont,
+                    MaximumSize = new Size(440, 0),
+                    Margin = new Padding(0, 0, 0, 8),
+                    Text = "Checking your clock…"
+                };
+                var guidance = new Label
+                {
+                    AutoSize = true,
+                    MinimumSize = new Size(440, 0),
+                    MaximumSize = new Size(440, 0),
+                    Margin = new Padding(0, 0, 0, 16),
+                    Text = "This may take a moment, especially if your PC just started."
+                };
+                var progress = new ProgressBar
+                {
+                    Dock = DockStyle.Fill,
+                    Height = 8,
+                    Margin = new Padding(0, 0, 0, 16),
+                    Style = ProgressBarStyle.Marquee,
+                    AccessibleName = "Checking the clock"
+                };
+                var startupStatus = new Label
+                {
+                    AutoSize = true,
+                    MaximumSize = new Size(440, 0),
+                    Margin = new Padding(0, 0, 0, 16),
+                    Text = "Setting up automatic checks at sign-in…"
+                };
+                var details = new TextBox
+                {
+                    Dock = DockStyle.Fill,
+                    Height = 140,
+                    Multiline = true,
+                    ReadOnly = true,
+                    ScrollBars = ScrollBars.Vertical,
+                    Margin = new Padding(0, 0, 0, 16),
+                    AccessibleName = "Technical details",
+                    Visible = false
+                };
+                var actions = new TableLayoutPanel
+                {
+                    AutoSize = true,
+                    Dock = DockStyle.Fill,
+                    ColumnCount = 2,
+                    RowCount = 1,
+                    Margin = Padding.Empty
+                };
+                actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+                actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+                var showDetails = new Button
+                {
+                    Text = "Show details",
+                    AutoSize = true,
+                    Anchor = AnchorStyles.Left,
+                    Margin = Padding.Empty
+                };
+                showDetails.Click += delegate
+                {
+                    details.Visible = !details.Visible;
+                    showDetails.Text = details.Visible ? "Hide details" : "Show details";
+                };
+                var close = new Button
+                {
+                    Text = "Close",
+                    AutoSize = true,
+                    MinimumSize = new Size(88, 0),
+                    Anchor = AnchorStyles.Right,
+                    Margin = Padding.Empty,
+                    Enabled = false
+                };
+                close.Click += delegate { window.Close(); };
+
+                actions.Controls.Add(showDetails, 0, 0);
+                actions.Controls.Add(close, 1, 0);
+                layout.Controls.Add(status, 0, 0);
+                layout.Controls.Add(guidance, 0, 1);
+                layout.Controls.Add(progress, 0, 2);
+                layout.Controls.Add(startupStatus, 0, 3);
+                layout.Controls.Add(details, 0, 4);
+                layout.Controls.Add(actions, 0, 5);
+                window.Controls.Add(layout);
+                window.AcceptButton = close;
+                window.CancelButton = close;
+
+                int result = 3;
+                bool running = true;
+                window.FormClosing += (sender, e) =>
+                {
+                    if (running && e.CloseReason == CloseReason.UserClosing)
+                        e.Cancel = true;
+                };
+                window.Shown += async delegate
+                {
+                    report = message => details.BeginInvoke((Action)(() =>
+                        details.AppendText(message + Environment.NewLine)));
+                    try
+                    {
+                        bool startupRegistered = await Task.Run((Func<bool>)RegisterStartup);
+                        startupStatus.Text = startupRegistered
+                            ? "Time Fix will run when you sign in."
+                            : "Automatic startup couldn’t be set up. See details.";
+                        result = await Task.Run((Func<int>)FixClock);
+                        ShowResult(result, status, guidance);
+                    }
+                    catch (Exception ex)
+                    {
+                        status.Text = "Something went wrong";
+                        guidance.Text = "Try again, or share the details below with IT.";
+                        details.AppendText(ex.Message + Environment.NewLine);
+                    }
+                    finally
+                    {
+                        running = false;
+                        progress.Visible = false;
+                        close.Enabled = true;
+                        close.Focus();
+                    }
+                };
+                Application.Run(window);
+                return result;
+            }
+        }
+    }
+
+    private static bool RegisterStartup()
+    {
+        try
+        {
+            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string directory = Path.Combine(localAppData, "IT Time Fix");
+            string startupExe = Path.Combine(directory, "IT Time Fix.exe");
+            string command = "\"" + startupExe + "\" /startup";
+            if (command.Length > 260)
+                throw new IOException("The startup command exceeds the Windows Run entry limit.");
+
+            if (!string.Equals(Application.ExecutablePath, startupExe, StringComparison.OrdinalIgnoreCase))
+            {
+                Directory.CreateDirectory(directory);
+                string stagedExe = Path.Combine(directory, Guid.NewGuid().ToString("N") + ".tmp");
+                try
+                {
+                    File.Copy(Application.ExecutablePath, stagedExe);
+                    if (File.Exists(startupExe))
+                        File.Replace(stagedExe, startupExe, null);
+                    else
+                        File.Move(stagedExe, startupExe);
+                }
+                finally
+                {
+                    File.Delete(stagedExe);
+                }
+            }
+
+            using (RegistryKey run = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
+            {
+                if (run == null)
+                    throw new IOException("Windows did not open the current user's Run key.");
+
+                run.SetValue("IT Time Fix", command, RegistryValueKind.String);
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Fail("Could not set up automatic startup: " + ex.Message);
+            return false;
+        }
+    }
+
+
+    private static void ShowResult(int result, Label status, Label guidance)
+    {
+        switch (result)
+        {
+            case 0:
+                status.Text = "Your clock is correct";
+                guidance.Text = "Windows shows " + DateTime.Now.ToString("f", CultureInfo.CurrentCulture) + ".";
+                break;
+            case 2:
+                status.Text = "Couldn’t check the clock";
+                guidance.Text = "Check your internet connection, then open IT Time Fix again.";
+                break;
+            case 5:
+                status.Text = "Your clock needs IT help";
+                guidance.Text = "This PC didn’t let Time Fix change the clock. Share the details below with IT.";
+                break;
+            default:
+                status.Text = "Couldn’t confirm the fix";
+                guidance.Text = "Wait a moment, then open IT Time Fix again. If it still fails, contact IT.";
+                break;
+        }
+    }
+
+
+    private static int FixClock()
+    {
         ApplyTimeZone();
 
-        Console.WriteLine();
-        Console.WriteLine("  Checking the clock against an internet time source...");
+        report("  Checking the clock against an internet time source...");
         DateTime? trueUtc = GetNetworkUtc();
         if (trueUtc == null)
         {
             Fail("No internet time source could be reached. Check the network and try again.");
-            return Done(2, quiet);
+            return 2;
         }
 
+        var elapsedSinceSample = Stopwatch.StartNew();
         double drift = (DateTime.UtcNow - trueUtc.Value).TotalSeconds;
-        Console.WriteLine("  Clock is off by " + drift.ToString("N1", CultureInfo.InvariantCulture) + " seconds.");
+        report("  Clock is off by " + drift.ToString("N1", CultureInfo.InvariantCulture) + " seconds.");
 
         if (Math.Abs(drift) <= ToleranceSeconds)
         {
             Ok("The clock is already correct. Nothing to do.");
-            return Done(0, quiet);
+            return 0;
         }
 
         // Path 1: we already hold the privilege (agent is an admin, or we were elevated).
         if (TrySetClockDirectly(trueUtc.Value))
         {
             Ok("Clock corrected. Local time is now " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
-            return Done(0, quiet);
+            return 0;
         }
 
-        // Path 2: the normal case -- ask the pre-installed SYSTEM task to do it.
-        Console.WriteLine("  This account cannot set the clock directly; asking the TimeFix task...");
-        if (TriggerTask() && WaitForCorrection(out drift))
+        // An existing task can apply the correction without elevating this process.
+        report("  Trying the TimeFix scheduled task...");
+        if (!TriggerTask())
+        {
+            Fail("The clock is still wrong. This account could not set it, and the TimeFix task could not be started.");
+            report("  Ask IT to enable clock correction on this PC.");
+            return 5;
+        }
+
+        if (WaitForCorrection(trueUtc.Value, elapsedSinceSample))
         {
             Ok("Clock corrected. Local time is now " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
-            return Done(0, quiet);
+            return 0;
         }
 
-        Console.WriteLine();
-        Console.WriteLine("  The TimeFix scheduled task is not installed on this PC.");
-
-        string batPath = Path.Combine(
-            Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
-            "Install-TimeFix.bat");
-
-        if (File.Exists(batPath))
-        {
-            Console.WriteLine("  Launching the one-time installer with admin rights...");
-            Console.WriteLine("  (A UAC prompt will appear -- click Yes to continue.)");
-            Console.WriteLine();
-            try
-            {
-                var psi = new ProcessStartInfo("cmd.exe", "/c \"" + batPath + "\"")
-                {
-                    UseShellExecute = true,
-                    Verb = "runas"
-                };
-                Process.Start(psi);
-                Ok("Installer launched. The clock will be corrected once setup completes.");
-                return Done(0, quiet);
-            }
-            catch (Exception ex)
-            {
-                Fail("Could not launch the installer: " + ex.Message);
-                Console.WriteLine("  Please run Install-TimeFix.bat manually as administrator.");
-                return Done(5, quiet);
-            }
-        }
-
-        Fail("The clock could not be corrected without administrator rights.");
-        Console.WriteLine();
-        Console.WriteLine("  The time zone was set correctly, but the clock itself is still wrong.");
-        Console.WriteLine("  Ask IT to run Install-TimeFix.bat once on this PC (one admin prompt,");
-        Console.WriteLine("  one time). After that this program will fix the clock on its own.");
-        Console.WriteLine();
-        Console.WriteLine("  Meanwhile you can try: right-click the clock -> Adjust date and time");
-        Console.WriteLine("  -> Sync now.");
-        return Done(5, quiet);
+        Fail("The TimeFix task was started, but the clock correction could not be verified.");
+        return 3;
     }
+
 
     // --- time zone (works unprivileged) -------------------------------------
 
@@ -240,14 +451,14 @@ internal static class FixTime
                     {
                         // The reply was produced roughly mid-flight.
                         utc = utc.AddMilliseconds(sw.ElapsedMilliseconds / 2.0);
-                        Console.WriteLine("    source ok: " + src[0] + " (" + sw.ElapsedMilliseconds + " ms)");
+                        report("    source ok: " + src[0] + " (" + sw.ElapsedMilliseconds + " ms)");
                         return utc;
                     }
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine("    source failed: " + src[0] + " - " + Short(ex.Message));
+                report("    source failed: " + src[0] + " - " + Short(ex.Message));
             }
         }
         return null;
@@ -270,7 +481,7 @@ internal static class FixTime
 
             int err = Marshal.GetLastWin32Error();
             if (err != ERROR_PRIVILEGE_NOT_HELD)
-                Console.WriteLine("    SetSystemTime failed with error " + err + ".");
+                report("    SetSystemTime failed with error " + err + ".");
             return false;
         }
         catch { return false; }
@@ -290,29 +501,28 @@ internal static class FixTime
                 string outp = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
                 p.WaitForExit();
                 if (p.ExitCode == 0) return true;
-                Console.WriteLine("    could not start the task: " + Short(outp));
+                report("    could not start the task: " + Short(outp));
                 return false;
             }
         }
-        catch (Exception ex) { Console.WriteLine("    " + Short(ex.Message)); return false; }
+        catch (Exception ex) { report("    " + Short(ex.Message)); return false; }
     }
 
-    private static bool WaitForCorrection(out double drift)
+    private static bool WaitForCorrection(DateTime sampledUtc, Stopwatch elapsedSinceSample)
     {
-        drift = double.MaxValue;
-        for (int i = 0; i < 8; i++)          // up to ~40 seconds
+        for (int attempt = 0; attempt < 8; attempt++)
         {
             Thread.Sleep(5000);
-            DateTime? t = GetNetworkUtc();
-            if (t == null) continue;
-            drift = (DateTime.UtcNow - t.Value).TotalSeconds;
+            DateTime expectedUtc = sampledUtc + elapsedSinceSample.Elapsed;
+            double drift = (DateTime.UtcNow - expectedUtc).TotalSeconds;
             if (Math.Abs(drift) <= ToleranceSeconds) return true;
-            Console.WriteLine("    still off by " + drift.ToString("N1", CultureInfo.InvariantCulture) + " s, waiting...");
+            report("    still off by " + drift.ToString("N1", CultureInfo.InvariantCulture) + " s, waiting...");
         }
         return false;
     }
 
-    // --- console helpers ----------------------------------------------------
+
+    // --- message helpers ----------------------------------------------------
 
     private static string Short(string s)
     {
@@ -321,24 +531,6 @@ internal static class FixTime
         return s.Length > 120 ? s.Substring(0, 117) + "..." : s;
     }
 
-    private static void Ok(string m)   { Write(ConsoleColor.Green,  "  [OK] "  + m); }
-    private static void Fail(string m) { Write(ConsoleColor.Red,    "  [!!] "  + m); }
-
-    private static void Write(ConsoleColor c, string m)
-    {
-        ConsoleColor old = Console.ForegroundColor;
-        try { Console.ForegroundColor = c; Console.WriteLine(m); }
-        finally { Console.ForegroundColor = old; }
-    }
-
-    private static int Done(int code, bool quiet)
-    {
-        if (!quiet)
-        {
-            Console.WriteLine();
-            Console.Write("  Press Enter to close...");
-            try { Console.ReadLine(); } catch { }
-        }
-        return code;
-    }
+    private static void Ok(string message)   { report("[OK] " + message); }
+    private static void Fail(string message) { report("[Error] " + message); }
 }
